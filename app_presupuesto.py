@@ -1,456 +1,473 @@
-import streamlit as st
+import io
+import unicodedata
+from typing import List, Optional
+
 import pandas as pd
-from io import BytesIO
-
-from reportlab.lib.pagesizes import letter, landscape
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak, Image
+import streamlit as st
 from reportlab.lib import colors
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.pagesizes import letter, landscape
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
-
-# --------------------- CONFIGURACIÓN BÁSICA --------------------- #
-
-st.set_page_config(
-    page_title="Programa de Asignación Presupuestal",
-    layout="wide"
+from reportlab.platypus import (
+    SimpleDocTemplate,
+    Paragraph,
+    Spacer,
+    Table,
+    TableStyle,
+    Image as RLImage,
+    PageBreak,
 )
-
-MONTH_NAMES = {
-    1: "enero",
-    2: "febrero",
-    3: "marzo",
-    4: "abril",
-    5: "mayo",
-    6: "junio",
-    7: "julio",
-    8: "agosto",
-    9: "septiembre",
-    10: "octubre",
-    11: "noviembre",
-    12: "diciembre",
-}
-
-# --------------------- ENCABEZADO EN PANTALLA --------------------- #
-
-st.markdown(
-    """
-    <div style='text-align:center; line-height:1.2'>
-        <h2 style='margin-bottom:0'>PROGRAMA DE ASIGNACIÓN PRESUPUESTAL</h2>
-        <p style='margin:4px 0'><b>AXA COLPATRIA</b></p>
-        <p style='margin:0'><b>Dirección de Distribución</b></p>
-        <p style='margin:0'><b>SISTEMA DE INTELIGENCIA COMERCIAL</b></p>
-    </div>
-    <hr>
-    """,
-    unsafe_allow_html=True
-)
-
-st.sidebar.header("Carga de archivo")
-
-uploaded_file = st.sidebar.file_uploader(
-    "Sube el archivo de presupuesto (Excel .xlsx)",
-    type=["xlsx"]
-)
-
-logo_file = st.sidebar.file_uploader(
-    "Carga el logo de AXA COLPATRIA (PNG/JPG)",
-    type=["png", "jpg", "jpeg"]
-)
-
-logo_bytes = None
-if logo_file is not None:
-    logo_bytes = logo_file.getvalue()
-
-# --------------------- FUNCIÓN PARA CARGAR DATOS --------------------- #
-
-@st.cache_data
-def load_data(file) -> pd.DataFrame:
-    df = pd.read_excel(file)
-    # Normalizamos nombres de columnas
-    df.columns = [c.strip() for c in df.columns]
-
-    # Aseguramos que Mes sea numérico
-    if "Mes" in df.columns:
-        df["Mes"] = pd.to_numeric(df["Mes"], errors="coerce").astype("Int64")
-    # Aseguramos que Año sea numérico si existe
-    if "Año" in df.columns:
-        df["Año"] = pd.to_numeric(df["Año"], errors="coerce").astype("Int64")
-
-    return df
+from PIL import Image
 
 
-def get_month_name(mes_num):
-    try:
-        mes_num = int(mes_num)
-        return MONTH_NAMES.get(mes_num, str(mes_num))
-    except Exception:
-        return str(mes_num)
+def quitar_acentos(texto: str) -> str:
+    if not isinstance(texto, str):
+        return ""
+    nfkd = unicodedata.normalize("NFKD", texto)
+    return "".join(c for c in nfkd if not unicodedata.combining(c))
 
 
-def get_year_for_group(df_group: pd.DataFrame):
-    """Obtiene el año de un subconjunto (si hay columna Año)."""
-    if "Año" in df_group.columns and df_group["Año"].notna().any():
-        vals = df_group["Año"].dropna().unique()
-        if len(vals) == 1:
-            return int(vals[0])
-        elif len(vals) > 1:
-            return int(vals[0])
+def normalizar_nombre_col(col: str) -> str:
+    return quitar_acentos(col).strip().lower()
+
+
+def buscar_columna(
+    df: pd.DataFrame, candidatos: List[str], contiene: Optional[str] = None
+) -> Optional[str]:
+    norm_map = {normalizar_nombre_col(c): c for c in df.columns}
+
+    for cand in candidatos:
+        cand_norm = normalizar_nombre_col(cand)
+        if cand_norm in norm_map:
+            return norm_map[cand_norm]
+
+    if contiene:
+        sub = normalizar_nombre_col(contiene)
+        posibles = [
+            real
+            for norm, real in norm_map.items()
+            if sub in norm and not norm.startswith("unnamed")
+        ]
+        if posibles:
+            return sorted(posibles)[0]
+
     return None
 
 
-# --------------------- FUNCIÓN PARA PINTAR UN COMPROBANTE EN LA APP --------------------- #
+def nombre_mes_es(num_mes: int) -> str:
+    meses = [
+        "enero",
+        "febrero",
+        "marzo",
+        "abril",
+        "mayo",
+        "junio",
+        "julio",
+        "agosto",
+        "septiembre",
+        "octubre",
+        "noviembre",
+        "diciembre",
+    ]
+    if 1 <= num_mes <= 12:
+        return meses[num_mes - 1]
+    return f"Mes {num_mes}"
 
-def mostrar_comprobante(df, director, mes):
-    df_filtrado = df[(df["Director"] == director) & (df["Mes"] == mes)]
 
-    if df_filtrado.empty:
-        st.warning("No hay registros para este director y mes.")
-        return
+def preparar_logo(logo_bytes: Optional[bytes], altura: float = 18 * mm) -> Optional[RLImage]:
+    if not logo_bytes:
+        return None
 
-    mes_nombre = get_month_name(mes)
-    anio = get_year_for_group(df_filtrado)
+    buffer_logo = io.BytesIO(logo_bytes)
+    img = RLImage(buffer_logo)
 
-    if anio is not None:
-        texto_asig = f"Asignación presupuestal para {director} del mes de {mes_nombre} del {anio}"
-    else:
-        texto_asig = f"Asignación presupuestal para {director} del mes de {mes_nombre}"
+    aspect = img.imageWidth / float(img.imageHeight)
+    img.drawHeight = altura
+    img.drawWidth = altura * aspect
+    return img
 
-    st.markdown(
-        f"""
-        <p style='text-align:center; font-size:16px; margin-top:8px'>
-        <b>{texto_asig}</b>
-        </p>
-        """,
-        unsafe_allow_html=True
+
+def construir_encabezado(story, styles, logo_bytes: Optional[bytes]):
+    logo_flowable = preparar_logo(logo_bytes)
+
+    titulo_lines = [
+        "PROGRAMA DE ASIGNACIÓN PRESUPUESTAL",
+        "AXA COLPATRIA",
+        "Dirección de Distribución",
+        "SISTEMA DE INTELIGENCIA COMERCIAL",
+    ]
+    titulo_text = "<br/>".join(titulo_lines)
+
+    estilo_titulo = ParagraphStyle(
+        "TituloEncabezado",
+        parent=styles["Normal"],
+        alignment=1,
+        fontSize=12,
+        leading=14,
+    )
+    par_titulo = Paragraph(titulo_text, estilo_titulo)
+
+    width, _ = landscape(letter)
+    tabla_data = [[par_titulo, logo_flowable if logo_flowable else ""]]
+    tabla = Table(tabla_data, colWidths=[0.75 * width, 0.25 * width])
+
+    tabla.setStyle(
+        TableStyle(
+            [
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("ALIGN", (0, 0), (0, 0), "CENTER"),
+                ("ALIGN", (1, 0), (1, 0), "RIGHT"),
+                ("BOX", (0, 0), (-1, -1), 0, colors.white),
+            ]
+        )
     )
 
-    # Columnas a mostrar en la tabla principal
-    columnas_tabla = [
-        "Linea Negocio",
+    story.append(tabla)
+    story.append(Spacer(1, 6 * mm))
+
+
+def construir_tabla_detalle(
+    df_subset: pd.DataFrame,
+    cols_detalle: List[str],
+    story,
+):
+    header = [
+        "Línea de negocio",
         "Ramo",
         "Zona",
         "Canal",
         "Sub-Canal",
         "Oficina",
-        "Líder comercial Esp.",
-        "Presupuesto"
+        "Líder Equipo",
+        "Valor",
     ]
 
-    columnas_presentes = [c for c in columnas_tabla if c in df_filtrado.columns]
+    data = [header]
+    for _, row in df_subset[cols_detalle].iterrows():
+        fila = [
+            str(row[cols_detalle[0]]),
+            str(row[cols_detalle[1]]),
+            str(row[cols_detalle[2]]),
+            str(row[cols_detalle[3]]),
+            str(row[cols_detalle[4]]),
+            str(row[cols_detalle[5]]),
+            str(row[cols_detalle[6]]),
+            f"{float(row[cols_detalle[7]]):,.0f}",
+        ]
+        data.append(fila)
 
-    df_tabla = df_filtrado[columnas_presentes].copy()
-
-    # Renombramos para presentación
-    renombres = {
-        "Linea Negocio": "Línea de negocio",
-        "Líder comercial Esp.": "Líder Equipo",
-        "Presupuesto": "Valor"
-    }
-    df_tabla.rename(columns=renombres, inplace=True)
-
-    # Formato numérico
-    if "Valor" in df_tabla.columns:
-        df_tabla["Valor"] = pd.to_numeric(df_tabla["Valor"], errors="coerce")
-
-    st.markdown("### Detalle de asignación")
-    st.dataframe(
-        df_tabla.style.format({"Valor": "{:,.0f}"}),
-        use_container_width=True
-    )
-
-    # Totales por línea de negocio
-    if "Línea de negocio" in df_tabla.columns and "Valor" in df_tabla.columns:
-        totales_linea = (
-            df_tabla.groupby("Línea de negocio", dropna=False)["Valor"]
-            .sum()
-            .reset_index()
+    tabla = Table(data, repeatRows=1)
+    tabla.setStyle(
+        TableStyle(
+            [
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+                ("ALIGN", (0, 0), (-1, 0), "CENTER"),
+                ("ALIGN", (7, 1), (7, -1), "RIGHT"),
+                ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ]
         )
-        st.markdown("#### Totales por línea de negocio")
-        st.table(totales_linea.style.format({"Valor": "{:,.0f}"}))
-
-        total_general = df_tabla["Valor"].sum()
-        st.markdown(f"**Total general del presupuesto: {total_general:,.0f}**")
-
-    # Bloque de firmas (sin líneas, con texto completo)
-    st.markdown(
-        """
-        <br><br>
-        <table style='width:100%; text-align:center; font-size:12px'>
-            <tr>
-                <td>
-                    <b>Usuario Elaboró:</b> SANCHEZ GUERRERO Eduin Danilo<br>
-                    Líder SIC VID BTA Torre Colpatria
-                </td>
-                <td>
-                    <b>Usuario Revisó:</b> DIAZ LOPEZ Angel Alberto<br>
-                    Líder CEAC VID BTA Torre Colpatria
-                </td>
-                <td>
-                    <b>Usuario Aprobó:</b> ROMERO FERNANDEZ Guiovanna Andrea<br>
-                    Líder Canal Multilinea SEG BTA Torre Colpatria
-                </td>
-            </tr>
-        </table>
-        """,
-        unsafe_allow_html=True
     )
 
-
-# --------------------- FUNCIÓN PARA GENERAR EXCEL CON TODAS LAS HOJAS --------------------- #
-
-def generar_excel_todos(df):
-    """
-    Genera un Excel en memoria donde:
-    - Cada hoja = un director + un mes.
-    - Cada hoja contiene la tabla de detalle de presupuesto.
-    """
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        for director in sorted(df["Director"].dropna().unique()):
-            df_dir = df[df["Director"] == director]
-            for mes in sorted(df_dir["Mes"].dropna().unique()):
-                df_mes = df_dir[df_dir["Mes"] == mes]
-                if df_mes.empty:
-                    continue
-
-                mes_nombre = get_month_name(mes)
-
-                sheet_name = f"{director.split(',')[0][:10]}_{mes_nombre[:3]}"
-                sheet_name = sheet_name.replace("/", "-")[:31]  # límite Excel
-
-                columnas_tabla = [
-                    "Linea Negocio",
-                    "Ramo",
-                    "Zona",
-                    "Canal",
-                    "Sub-Canal",
-                    "Oficina",
-                    "Líder comercial Esp.",
-                    "Presupuesto"
-                ]
-                columnas_presentes = [c for c in columnas_tabla if c in df_mes.columns]
-                df_out = df_mes[columnas_presentes].copy()
-                df_out.to_excel(writer, sheet_name=sheet_name, index=False)
-
-    output.seek(0)
-    return output
+    story.append(tabla)
+    story.append(Spacer(1, 5 * mm))
 
 
-# --------------------- FUNCIÓN PARA GENERAR PDF CON TODAS LAS HOJAS --------------------- #
+def construir_resumen(
+    df_subset: pd.DataFrame,
+    col_linea: str,
+    col_valor: str,
+    styles,
+    story,
+):
+    resumen = (
+        df_subset.groupby(col_linea)[col_valor]
+        .sum()
+        .reset_index()
+        .sort_values(col_linea)
+    )
 
-def generar_pdf_todos(df, logo_bytes=None):
-    """
-    Genera un PDF en memoria donde:
-    - Cada página es un director + un mes.
-    - Cada página incluye encabezado, logo (si se cargó), tabla, totales y pie de firmas.
-    Formato: Hoja carta horizontal (landscape(letter))
-    """
-    buffer = BytesIO()
+    header = ["Línea de negocio", "Valor total"]
+    data = [header]
+    for _, row in resumen.iterrows():
+        data.append(
+            [
+                str(row[col_linea]),
+                f"{float(row[col_valor]):,.0f}",
+            ]
+        )
 
+    tabla = Table(data, repeatRows=1, colWidths=[80 * mm, 40 * mm])
+    tabla.setStyle(
+        TableStyle(
+            [
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+                ("ALIGN", (1, 1), (1, -1), "RIGHT"),
+                ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ]
+        )
+    )
+
+    story.append(tabla)
+
+    total_general = float(df_subset[col_valor].sum())
+    estilo_total = ParagraphStyle(
+        "TotalPresupuesto",
+        parent=styles["Normal"],
+        alignment=0,
+        fontSize=9,
+    )
+    texto_total = (
+        f"Total general del presupuesto: "
+        f"<b>{total_general:,.0f}</b>"
+    )
+    story.append(Spacer(1, 3 * mm))
+    story.append(Paragraph(texto_total, estilo_total))
+    story.append(Spacer(1, 8 * mm))
+
+
+def construir_pie_pagina(styles, story):
+    estilo_footer = ParagraphStyle(
+        "Footer",
+        parent=styles["Normal"],
+        alignment=0,
+        fontSize=8,
+        leading=10,
+    )
+
+    textos = [
+        (
+            "Usuario Elaboró: SANCHEZ GUERRERO Eduin Danilo<br/>"
+            "Líder SIC VID BTA Torre Colpatria"
+        ),
+        (
+            "Usuario Revisó: DIAZ LOPEZ Angel Alberto<br/>"
+            "Líder CEAC VID BTA Torre Colpatria"
+        ),
+        (
+            "Usuario Aprobó: ROMERO FERNANDEZ Guiovanna Andrea<br/>"
+            "Líder Canal Multilinea SEG BTA Torre Colpatria"
+        ),
+    ]
+
+    pars = [Paragraph(t, estilo_footer) for t in textos]
+
+    tabla = Table([pars], colWidths=[70 * mm, 70 * mm, 70 * mm])
+    tabla.setStyle(
+        TableStyle(
+            [
+                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ]
+        )
+    )
+
+    story.append(tabla)
+
+
+def generar_pdf_presupuesto(
+    df: pd.DataFrame,
+    logo_bytes: Optional[bytes] = None,
+) -> bytes:
+    styles = getSampleStyleSheet()
+    buffer = io.BytesIO()
     doc = SimpleDocTemplate(
         buffer,
         pagesize=landscape(letter),
         leftMargin=15 * mm,
         rightMargin=15 * mm,
-        topMargin=15 * mm,
-        bottomMargin=15 * mm,
+        topMargin=10 * mm,
+        bottomMargin=10 * mm,
     )
 
-    styles = getSampleStyleSheet()
-    styles.add(ParagraphStyle(name="CenterBold", alignment=1, fontSize=14, leading=16, spaceAfter=4))
-    styles.add(ParagraphStyle(name="Center", alignment=1, fontSize=10, leading=12))
-    styles.add(ParagraphStyle(name="NormalSmall", fontSize=9, leading=11))
+    col_director = buscar_columna(
+        df,
+        ["Director", "Franquicia", "Nombre Director", "Director Comercial"],
+        contiene="director",
+    )
+    col_mes = buscar_columna(df, ["Mes"], contiene="mes")
+    col_ano = buscar_columna(df, ["Año", "Ano", "Year"], contiene="an")
+
+    col_linea = buscar_columna(
+        df, ["Línea de negocio", "Linea de negocio"], contiene="linea"
+    )
+    col_ramo = buscar_columna(df, ["Ramo"], contiene="ramo")
+    col_zona = buscar_columna(df, ["Zona"], contiene="zona")
+    col_canal = buscar_columna(df, ["Canal"], contiene="canal")
+    col_subcanal = buscar_columna(
+        df, ["Sub-Canal", "Subcanal", "Sub Canal"], contiene="sub"
+    )
+    col_oficina = buscar_columna(df, ["Oficina"], contiene="oficina")
+    col_lider = buscar_columna(
+        df, ["Lider Equipo", "Líder Equipo", "Lider"], contiene="lider"
+    )
+    col_valor = buscar_columna(
+        df, ["Valor", "Presupuesto", "Valor Total"], contiene="valor"
+    )
+
+    columnas_requeridas = {
+        "Director": col_director,
+        "Mes": col_mes,
+        "Año": col_ano,
+        "Línea de negocio": col_linea,
+        "Ramo": col_ramo,
+        "Zona": col_zona,
+        "Canal": col_canal,
+        "Sub-Canal": col_subcanal,
+        "Oficina": col_oficina,
+        "Líder Equipo": col_lider,
+        "Valor": col_valor,
+    }
+
+    faltantes = [log for log, real in columnas_requeridas.items() if real is None]
+    if faltantes:
+        raise ValueError(
+            "No se pudieron encontrar las columnas requeridas en el archivo Excel. "
+            f"Faltan: {', '.join(faltantes)}"
+        )
+
+    df[col_valor] = pd.to_numeric(df[col_valor], errors="coerce").fillna(0)
 
     story = []
 
-    # Recorremos directores y meses
-    first_page = True
-    for director in sorted(df["Director"].dropna().unique()):
-        df_dir = df[df["Director"] == director]
-        for mes in sorted(df_dir["Mes"].dropna().unique()):
-            df_mes = df_dir[df_dir["Mes"] == mes]
-            if df_mes.empty:
+    directores = sorted([d for d in df[col_director].dropna().unique()])
+
+    for director in directores:
+        df_dir = df[df[col_director] == director].copy()
+
+        meses_unicos = [m for m in df_dir[col_mes].dropna().unique()]
+        try:
+            meses_ordenados = sorted(meses_unicos, key=lambda x: int(float(x)))
+        except Exception:
+            meses_ordenados = sorted(meses_unicos, key=lambda x: str(x))
+
+        for mes in meses_ordenados:
+            df_dm = df_dir[df_dir[col_mes] == mes].copy()
+            if df_dm.empty:
                 continue
 
-            if not first_page:
-                story.append(PageBreak())
-            first_page = False
+            construir_encabezado(story, styles, logo_bytes)
 
-            mes_nombre = get_month_name(mes)
-            anio = get_year_for_group(df_mes)
+            mes_val = df_dm[col_mes].iloc[0]
+            try:
+                mes_num = int(float(mes_val))
+            except Exception:
+                mes_num = None
 
-            # Logo en esquina superior derecha (si se cargó)
-            if logo_bytes is not None:
-                try:
-                    img = Image(BytesIO(logo_bytes), 40 * mm, 15 * mm)
-                    img.hAlign = "RIGHT"
-                    story.append(img)
-                    story.append(Spacer(1, 4))
-                except Exception:
-                    pass
-
-            # Encabezado por página
-            story.append(Paragraph("PROGRAMA DE ASIGNACIÓN PRESUPUESTAL", styles["CenterBold"]))
-            story.append(Paragraph("AXA COLPATRIA", styles["Center"]))
-            story.append(Paragraph("Dirección de Distribución", styles["Center"]))
-            story.append(Paragraph("SISTEMA DE INTELIGENCIA COMERCIAL", styles["Center"]))
-            story.append(Spacer(1, 6))
-
-            if anio is not None:
-                texto_asig = f"Asignación presupuestal para {director} del mes de {mes_nombre} del {anio}"
+            if mes_num is not None and 1 <= mes_num <= 12:
+                nombre_mes = nombre_mes_es(mes_num)
             else:
-                texto_asig = f"Asignación presupuestal para {director} del mes de {mes_nombre}"
+                nombre_mes = str(mes_val)
 
-            story.append(Paragraph(texto_asig, styles["Center"]))
-            story.append(Spacer(1, 8))
+            anos = [a for a in df_dm[col_ano].dropna().unique()]
+            if anos:
+                try:
+                    ano_text = str(int(float(anos[0])))
+                except Exception:
+                    ano_text = str(anos[0])
+            else:
+                ano_text = ""
 
-            # Tabla principal
-            columnas_tabla = [
-                "Linea Negocio",
-                "Ramo",
-                "Zona",
-                "Canal",
-                "Sub-Canal",
-                "Oficina",
-                "Líder comercial Esp.",
-                "Presupuesto"
-            ]
-            columnas_presentes = [c for c in columnas_tabla if c in df_mes.columns]
-            df_tabla = df_mes[columnas_presentes].copy()
+            estilo_sub = ParagraphStyle(
+                "Subtitulo",
+                parent=styles["Normal"],
+                alignment=1,
+                fontSize=10,
+                leading=12,
+            )
+            texto_sub = (
+                f"Asignación presupuestal para {director} "
+                f"del mes de {nombre_mes}"
+            )
+            if ano_text:
+                texto_sub += f" del {ano_text}"
 
-            renombres = {
-                "Linea Negocio": "Línea de negocio",
-                "Líder comercial Esp.": "Líder Equipo",
-                "Presupuesto": "Valor"
-            }
-            df_tabla.rename(columns=renombres, inplace=True)
+            story.append(Paragraph(texto_sub, estilo_sub))
+            story.append(Spacer(1, 5 * mm))
 
-            if "Valor" in df_tabla.columns:
-                df_tabla["Valor"] = pd.to_numeric(df_tabla["Valor"], errors="coerce")
-
-            # Construimos data para la tabla PDF
-            headers = list(df_tabla.columns)
-            data = [headers]
-            for _, row in df_tabla.iterrows():
-                fila = []
-                for col in headers:
-                    val = row[col]
-                    if col == "Valor" and pd.notna(val):
-                        fila.append(f"{val:,.0f}")
-                    else:
-                        fila.append("" if pd.isna(val) else str(val))
-                data.append(fila)
-
-            table = Table(data, repeatRows=1)
-            table.setStyle(TableStyle([
-                ("GRID", (0, 0), (-1, -1), 0.25, colors.black),
-                ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-                ("ALIGN", (0, 0), (-1, 0), "CENTER"),
-                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("FONTSIZE", (0, 0), (-1, 0), 9),
-                ("FONTSIZE", (0, 1), (-1, -1), 8),
-                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ]))
-            story.append(table)
-            story.append(Spacer(1, 6))
-
-            # Totales por línea de negocio y total general
-            if "Línea de negocio" in df_tabla.columns and "Valor" in df_tabla.columns:
-                totales_linea = (
-                    df_tabla.groupby("Línea de negocio", dropna=False)["Valor"]
-                    .sum()
-                    .reset_index()
-                )
-                # Tabla de totales
-                data_tot = [["Línea de negocio", "Valor total"]]
-                for _, row in totales_linea.iterrows():
-                    ln = "" if pd.isna(row["Línea de negocio"]) else str(row["Línea de negocio"])
-                    v = row["Valor"] if pd.notna(row["Valor"]) else 0
-                    data_tot.append([ln, f"{v:,.0f}"])
-
-                table_tot = Table(data_tot, colWidths=[80 * mm, 30 * mm])
-                table_tot.setStyle(TableStyle([
-                    ("GRID", (0, 0), (-1, -1), 0.25, colors.black),
-                    ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-                    ("ALIGN", (1, 1), (1, -1), "RIGHT"),
-                    ("FONTSIZE", (0, 0), (-1, -1), 8),
-                ]))
-                story.append(table_tot)
-                story.append(Spacer(1, 4))
-
-                total_general = df_tabla["Valor"].sum()
-                story.append(Paragraph(f"<b>Total general del presupuesto: {total_general:,.0f}</b>", styles["NormalSmall"]))
-                story.append(Spacer(1, 10))
-
-            # Pie de firmas (sin líneas, texto completo)
-            firmas_data = [
-                [
-                    "Usuario Elaboró: SANCHEZ GUERRERO Eduin Danilo\nLíder SIC VID BTA Torre Colpatria",
-                    "Usuario Revisó: DIAZ LOPEZ Angel Alberto\nLíder CEAC VID BTA Torre Colpatria",
-                    "Usuario Aprobó: ROMERO FERNANDEZ Guiovanna Andrea\nLíder Canal Multilinea SEG BTA Torre Colpatria",
-                ]
+            cols_detalle = [
+                col_linea,
+                col_ramo,
+                col_zona,
+                col_canal,
+                col_subcanal,
+                col_oficina,
+                col_lider,
+                col_valor,
             ]
 
-            firmas_table = Table(firmas_data, colWidths="*")
-            firmas_table.setStyle(TableStyle([
-                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-                ("FONTSIZE", (0, 0), (-1, -1), 8),
-            ]))
-            story.append(Spacer(1, 20))
-            story.append(firmas_table)
+            construir_tabla_detalle(df_dm, cols_detalle, story)
+            construir_resumen(df_dm, col_linea, col_valor, styles, story)
+            construir_pie_pagina(styles, story)
+            story.append(PageBreak())
 
-    # Construimos el PDF
+    if story and isinstance(story[-1], PageBreak):
+        story = story[:-1]
+
     doc.build(story)
-    buffer.seek(0)
-    return buffer
+    pdf_bytes = buffer.getvalue()
+    buffer.close()
+    return pdf_bytes
 
 
-# --------------------- LÓGICA PRINCIPAL DE LA APP --------------------- #
-
-if uploaded_file is None:
-    st.info("Sube el archivo **Presupuesto 2023.xlsx** en el panel lateral para comenzar.")
-else:
-    df = load_data(uploaded_file)
-
-    st.success(
-        f"Archivo cargado correctamente. Filas: {len(df):,} | Columnas: {len(df.columns)}"
+def main():
+    st.set_page_config(
+        page_title="Programa de Asignación Presupuestal",
+        layout="centered",
     )
 
-    # Controles para seleccionar Director y Mes
-    directores = sorted(df["Director"].dropna().unique())
-    meses_disponibles = sorted(df["Mes"].dropna().unique())
+    st.title("Programa de Asignación Presupuestal")
 
-    col1, col2 = st.columns(2)
-    with col1:
-        director_sel = st.selectbox("Selecciona el Director", directores)
-    with col2:
-        mes_sel = st.selectbox(
-            "Selecciona el mes",
-            meses_disponibles,
-            format_func=get_month_name
-        )
+    st.write(
+        """
+        Carga el archivo de presupuesto (2023, 2024 o 2025) y, opcionalmente, 
+        el logo de AXA COLPATRIA.  
+        La aplicación generará un PDF con una hoja por cada Director y por cada mes.
+        """
+    )
 
-    mostrar_comprobante(df, director_sel, mes_sel)
+    archivo = st.file_uploader(
+        "Cargar archivo de presupuesto (Excel)",
+        type=["xlsx", "xls"],
+    )
 
-    st.markdown("---")
-    st.subheader("Descargar todos los comprobantes")
+    logo_file = st.file_uploader(
+        "Cargar logo de AXA COLPATRIA (PNG/JPG)",
+        type=["png", "jpg", "jpeg"],
+    )
 
-    colx, coly = st.columns(2)
-    with colx:
-        if st.button("Generar libro Excel (director x mes)"):
-            excel_bytes = generar_excel_todos(df)
-            st.download_button(
-                "Descargar archivo Excel",
-                data=excel_bytes,
-                file_name="Asignacion_Presupuestal_Directores.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-    with coly:
-        if st.button("Generar PDF (una hoja por director y mes)"):
-            pdf_bytes = generar_pdf_todos(df, logo_bytes=logo_bytes)
-            st.download_button(
-                "Descargar archivo PDF",
-                data=pdf_bytes,
-                file_name="Asignacion_Presupuestal_Directores.pdf",
-                mime="application/pdf",
-            )
+    logo_bytes = None
+    if logo_file is not None:
+        logo_bytes = logo_file.read()
+        st.image(logo_bytes, caption="Previsualización del logo", width=160)
+
+    if archivo is not None:
+        try:
+            df = pd.read_excel(archivo)
+        except Exception as e:
+            st.error(f"Error al leer el archivo de Excel: {e}")
+            return
+
+        st.subheader("Vista previa de los datos")
+        st.dataframe(df.head(20))
+
+        st.write("---")
+        st.subheader("Generar PDF")
+
+        if st.button("Preparar PDF de asignación presupuestal"):
+            try:
+                pdf_bytes = generar_pdf_presupuesto(df, logo_bytes)
+                st.success("PDF generado correctamente.")
+                st.download_button(
+                    label="Descargar PDF",
+                    data=pdf_bytes,
+                    file_name="programa_asignacion_presupuestal.pdf",
+                    mime="application/pdf",
+                )
+            except Exception as e:
+                st.error(f"Ocurrió un error al generar el PDF: {e}")
+
+
+if __name__ == "__main__":
+    main()
