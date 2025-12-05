@@ -3,7 +3,7 @@ import pandas as pd
 from io import BytesIO
 
 from reportlab.lib.pagesizes import letter, landscape
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak, Image
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import mm
@@ -11,7 +11,7 @@ from reportlab.lib.units import mm
 # --------------------- CONFIGURACIÓN BÁSICA --------------------- #
 
 st.set_page_config(
-    page_title="Modelo de Asignación Presupuestal",
+    page_title="Programa de Asignación Presupuestal",
     layout="wide"
 )
 
@@ -35,8 +35,9 @@ MONTH_NAMES = {
 st.markdown(
     """
     <div style='text-align:center; line-height:1.2'>
-        <h2 style='margin-bottom:0'>MODELO DE ASIGNACIÓN PRESUPUESTAL</h2>
-        <p style='margin:4px 0'><b>Dirección de Distribución</b></p>
+        <h2 style='margin-bottom:0'>PROGRAMA DE ASIGNACIÓN PRESUPUESTAL</h2>
+        <p style='margin:4px 0'><b>AXA COLPATRIA</b></p>
+        <p style='margin:0'><b>Dirección de Distribución</b></p>
         <p style='margin:0'><b>SISTEMA DE INTELIGENCIA COMERCIAL</b></p>
     </div>
     <hr>
@@ -51,6 +52,15 @@ uploaded_file = st.sidebar.file_uploader(
     type=["xlsx"]
 )
 
+logo_file = st.sidebar.file_uploader(
+    "Carga el logo de AXA COLPATRIA (PNG/JPG)",
+    type=["png", "jpg", "jpeg"]
+)
+
+logo_bytes = None
+if logo_file is not None:
+    logo_bytes = logo_file.getvalue()
+
 # --------------------- FUNCIÓN PARA CARGAR DATOS --------------------- #
 
 @st.cache_data
@@ -62,6 +72,9 @@ def load_data(file) -> pd.DataFrame:
     # Aseguramos que Mes sea numérico
     if "Mes" in df.columns:
         df["Mes"] = pd.to_numeric(df["Mes"], errors="coerce").astype("Int64")
+    # Aseguramos que Año sea numérico si existe
+    if "Año" in df.columns:
+        df["Año"] = pd.to_numeric(df["Año"], errors="coerce").astype("Int64")
 
     return df
 
@@ -74,6 +87,17 @@ def get_month_name(mes_num):
         return str(mes_num)
 
 
+def get_year_for_group(df_group: pd.DataFrame):
+    """Obtiene el año de un subconjunto (si hay columna Año)."""
+    if "Año" in df_group.columns and df_group["Año"].notna().any():
+        vals = df_group["Año"].dropna().unique()
+        if len(vals) == 1:
+            return int(vals[0])
+        elif len(vals) > 1:
+            return int(vals[0])
+    return None
+
+
 # --------------------- FUNCIÓN PARA PINTAR UN COMPROBANTE EN LA APP --------------------- #
 
 def mostrar_comprobante(df, director, mes):
@@ -84,11 +108,17 @@ def mostrar_comprobante(df, director, mes):
         return
 
     mes_nombre = get_month_name(mes)
+    anio = get_year_for_group(df_filtrado)
+
+    if anio is not None:
+        texto_asig = f"Asignación presupuestal para {director} del mes de {mes_nombre} del {anio}"
+    else:
+        texto_asig = f"Asignación presupuestal para {director} del mes de {mes_nombre}"
 
     st.markdown(
         f"""
         <p style='text-align:center; font-size:16px; margin-top:8px'>
-        <b>Asignación presupuestal para {director} del mes de {mes_nombre}</b>
+        <b>{texto_asig}</b>
         </p>
         """,
         unsafe_allow_html=True
@@ -141,27 +171,22 @@ def mostrar_comprobante(df, director, mes):
         total_general = df_tabla["Valor"].sum()
         st.markdown(f"**Total general del presupuesto: {total_general:,.0f}**")
 
-    # Bloque de firmas
+    # Bloque de firmas (sin líneas, con texto completo)
     st.markdown(
         """
         <br><br>
         <table style='width:100%; text-align:center; font-size:12px'>
             <tr>
-                <td>__________________________________</td>
-                <td>__________________________________</td>
-                <td>__________________________________</td>
-            </tr>
-            <tr>
                 <td>
-                    <b>Elaboró:</b> SANCHEZ GUERRERO Eduin Danilo<br>
+                    <b>Usuario Elaboró:</b> SANCHEZ GUERRERO Eduin Danilo<br>
                     Líder SIC VID BTA Torre Colpatria
                 </td>
                 <td>
-                    <b>Revisó:</b> DIAZ LOPEZ Angel Alberto<br>
+                    <b>Usuario Revisó:</b> DIAZ LOPEZ Angel Alberto<br>
                     Líder CEAC VID BTA Torre Colpatria
                 </td>
                 <td>
-                    <b>Aprobó:</b> ROMERO FERNANDEZ Guiovanna Andrea<br>
+                    <b>Usuario Aprobó:</b> ROMERO FERNANDEZ Guiovanna Andrea<br>
                     Líder Canal Multilinea SEG BTA Torre Colpatria
                 </td>
             </tr>
@@ -213,11 +238,11 @@ def generar_excel_todos(df):
 
 # --------------------- FUNCIÓN PARA GENERAR PDF CON TODAS LAS HOJAS --------------------- #
 
-def generar_pdf_todos(df):
+def generar_pdf_todos(df, logo_bytes=None):
     """
     Genera un PDF en memoria donde:
     - Cada página es un director + un mes.
-    - Cada página incluye encabezado, tabla, totales y pie de firmas.
+    - Cada página incluye encabezado, logo (si se cargó), tabla, totales y pie de firmas.
     Formato: Hoja carta horizontal (landscape(letter))
     """
     buffer = BytesIO()
@@ -239,22 +264,43 @@ def generar_pdf_todos(df):
     story = []
 
     # Recorremos directores y meses
-    for idx_dir, director in enumerate(sorted(df["Director"].dropna().unique())):
+    first_page = True
+    for director in sorted(df["Director"].dropna().unique()):
         df_dir = df[df["Director"] == director]
-        for idx_mes, mes in enumerate(sorted(df_dir["Mes"].dropna().unique())):
+        for mes in sorted(df_dir["Mes"].dropna().unique()):
             df_mes = df_dir[df_dir["Mes"] == mes]
             if df_mes.empty:
                 continue
 
+            if not first_page:
+                story.append(PageBreak())
+            first_page = False
+
             mes_nombre = get_month_name(mes)
+            anio = get_year_for_group(df_mes)
+
+            # Logo en esquina superior derecha (si se cargó)
+            if logo_bytes is not None:
+                try:
+                    img = Image(BytesIO(logo_bytes), 40 * mm, 15 * mm)
+                    img.hAlign = "RIGHT"
+                    story.append(img)
+                    story.append(Spacer(1, 4))
+                except Exception:
+                    pass
 
             # Encabezado por página
-            story.append(Paragraph("MODELO DE ASIGNACIÓN PRESUPUESTAL", styles["CenterBold"]))
+            story.append(Paragraph("PROGRAMA DE ASIGNACIÓN PRESUPUESTAL", styles["CenterBold"]))
+            story.append(Paragraph("AXA COLPATRIA", styles["Center"]))
             story.append(Paragraph("Dirección de Distribución", styles["Center"]))
             story.append(Paragraph("SISTEMA DE INTELIGENCIA COMERCIAL", styles["Center"]))
             story.append(Spacer(1, 6))
 
-            texto_asig = f"Asignación presupuestal para {director} del mes de {mes_nombre}"
+            if anio is not None:
+                texto_asig = f"Asignación presupuestal para {director} del mes de {mes_nombre} del {anio}"
+            else:
+                texto_asig = f"Asignación presupuestal para {director} del mes de {mes_nombre}"
+
             story.append(Paragraph(texto_asig, styles["Center"]))
             story.append(Spacer(1, 8))
 
@@ -322,7 +368,7 @@ def generar_pdf_todos(df):
                     v = row["Valor"] if pd.notna(row["Valor"]) else 0
                     data_tot.append([ln, f"{v:,.0f}"])
 
-                table_tot = Table(data_tot, colWidths=[80*mm, 30*mm])
+                table_tot = Table(data_tot, colWidths=[80 * mm, 30 * mm])
                 table_tot.setStyle(TableStyle([
                     ("GRID", (0, 0), (-1, -1), 0.25, colors.black),
                     ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
@@ -336,36 +382,22 @@ def generar_pdf_todos(df):
                 story.append(Paragraph(f"<b>Total general del presupuesto: {total_general:,.0f}</b>", styles["NormalSmall"]))
                 story.append(Spacer(1, 10))
 
-            # Pie de firmas
+            # Pie de firmas (sin líneas, texto completo)
             firmas_data = [
-                ["", "", ""],
                 [
-                    "_______________________________",
-                    "_______________________________",
-                    "_______________________________",
-                ],
-                [
-                    "Elaboró: SANCHEZ GUERRERO Eduin Danilo",
-                    "Revisó: DIAZ LOPEZ Angel Alberto",
-                    "Aprobó: ROMERO FERNANDEZ Guiovanna Andrea",
-                ],
-                [
-                    "Líder SIC VID BTA Torre Colpatria",
-                    "Líder CEAC VID BTA Torre Colpatria",
-                    "Líder Canal Multilinea SEG BTA Torre Colpatria",
-                ],
+                    "Usuario Elaboró: SANCHEZ GUERRERO Eduin Danilo\nLíder SIC VID BTA Torre Colpatria",
+                    "Usuario Revisó: DIAZ LOPEZ Angel Alberto\nLíder CEAC VID BTA Torre Colpatria",
+                    "Usuario Aprobó: ROMERO FERNANDEZ Guiovanna Andrea\nLíder Canal Multilinea SEG BTA Torre Colpatria",
+                ]
             ]
 
             firmas_table = Table(firmas_data, colWidths="*")
             firmas_table.setStyle(TableStyle([
-                ("ALIGN", (0, 1), (-1, -1), "CENTER"),
-                ("FONTSIZE", (0, 1), (-1, -1), 8),
+                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                ("FONTSIZE", (0, 0), (-1, -1), 8),
             ]))
             story.append(Spacer(1, 20))
             story.append(firmas_table)
-
-            # Saltamos de página si no es la última combinación
-            story.append(PageBreak())
 
     # Construimos el PDF
     doc.build(story)
@@ -415,7 +447,7 @@ else:
             )
     with coly:
         if st.button("Generar PDF (una hoja por director y mes)"):
-            pdf_bytes = generar_pdf_todos(df)
+            pdf_bytes = generar_pdf_todos(df, logo_bytes=logo_bytes)
             st.download_button(
                 "Descargar archivo PDF",
                 data=pdf_bytes,
